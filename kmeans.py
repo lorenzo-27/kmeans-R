@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 from sklearn.datasets import make_blobs
 
-from kmeans_config import MAX_ITER, N_CLUSTERS, N_FEATURES_LIST, N_SAMPLES
+from kmeans_config import MAX_ITER, N_CLUSTERS, N_FEATURES_LIST, N_SAMPLES, NUM_THREADS
 
 # Create necessary directories
 PROJECT_ROOT = Path(__file__).parent
@@ -27,6 +27,7 @@ class ExperimentResult:
     sequential_time: float
     parallel_time: float
     speedup: float
+    n_threads: int
 
 
 def generate_dataset(
@@ -97,14 +98,15 @@ def save_dataset(x: np.ndarray, filename: str) -> None:
     pass
 
 
-def run_kmeans_r(input_file: str, k: int, max_iter: int) -> ExperimentResult:
+def run_kmeans_r(input_file: str, k: int, max_iter: int, n_threads: int) -> ExperimentResult:
     """Run k-means with R sequential and parallel implementations."""
     # Prepare arguments for R script
     args = json.dumps({
         "dataset_file": input_file,
         "n_clusters": k,
         "max_iter": max_iter,
-        "data_dir": str(DATA_DIR)
+        "data_dir": str(DATA_DIR),
+        "n_threads": n_threads
     }).replace('"', '\\"')  # Properly escape double quotes for shell
 
     # Call R function
@@ -115,7 +117,7 @@ def run_kmeans_r(input_file: str, k: int, max_iter: int) -> ExperimentResult:
         f"cat(result)"
     ]
 
-    print(f"Executing R kmeans on {input_file} with k={k} and max_iter={max_iter}")
+    print(f"Executing R kmeans on {input_file} with k={k}, max_iter={max_iter}, and threads={n_threads}")
 
     try:
         output = subprocess.check_output(r_cmd, stderr=subprocess.PIPE).decode().strip()
@@ -124,7 +126,7 @@ def run_kmeans_r(input_file: str, k: int, max_iter: int) -> ExperimentResult:
         if not output:
             print("Warning: Empty response from R script")
             # Return default values
-            return ExperimentResult(sequential_time=1.0, parallel_time=1.0, speedup=1.0)
+            return ExperimentResult(sequential_time=1.0, parallel_time=1.0, speedup=1.0, n_threads=n_threads)
 
         try:
             # Extract only the JSON part from the output
@@ -136,10 +138,11 @@ def run_kmeans_r(input_file: str, k: int, max_iter: int) -> ExperimentResult:
 
                 # Make sure we're getting the first element if it's an array
                 sequential_time = result["sequential_time"][0] if isinstance(result["sequential_time"], list) else \
-                result["sequential_time"]
+                    result["sequential_time"]
                 parallel_time = result["parallel_time"][0] if isinstance(result["parallel_time"], list) else result[
                     "parallel_time"]
                 speedup = result["speedup"][0] if isinstance(result["speedup"], list) else result["speedup"]
+                threads = result["n_threads"][0] if isinstance(result["n_threads"], list) else result["n_threads"]
 
                 # Ensure values are never zero to prevent division by zero errors
                 if sequential_time <= 0:
@@ -150,115 +153,229 @@ def run_kmeans_r(input_file: str, k: int, max_iter: int) -> ExperimentResult:
                 return ExperimentResult(
                     sequential_time=sequential_time,
                     parallel_time=parallel_time,
-                    speedup=speedup
+                    speedup=speedup,
+                    n_threads=threads
                 )
             else:
                 print(f"Could not find valid JSON in response: '{output}'")
                 # Return default values
-                return ExperimentResult(sequential_time=1.0, parallel_time=1.0, speedup=1.0)
+                return ExperimentResult(sequential_time=1.0, parallel_time=1.0, speedup=1.0, n_threads=n_threads)
 
         except json.JSONDecodeError as e:
             print(f"Failed to parse JSON response: {e}")
             print(f"Raw response: '{output}'")
             # Return default values to avoid crashing
-            return ExperimentResult(sequential_time=1.0, parallel_time=1.0, speedup=1.0)
+            return ExperimentResult(sequential_time=1.0, parallel_time=1.0, speedup=1.0, n_threads=n_threads)
 
     except subprocess.CalledProcessError as e:
         print(f"R script execution failed with error: {e}")
         print(f"Error output: {e.stderr.decode()}")
         # Return default values as fallback
-        return ExperimentResult(sequential_time=1.0, parallel_time=1.0, speedup=1.0)
+        return ExperimentResult(sequential_time=1.0, parallel_time=1.0, speedup=1.0, n_threads=n_threads)
 
 
 def plot_execution_times(
-        results: Dict[int, ExperimentResult], output_prefix: str
+        results: Dict[Tuple[int, int], ExperimentResult], output_prefix: str
 ) -> None:
-    """Plot execution times comparison between sequential and parallel implementations."""
-    dimensions = list(results.keys())
-    sequential_times = [r.sequential_time for r in results.values()]
-    parallel_times = [r.parallel_time for r in results.values()]
+    """Plot execution times comparison between sequential and parallel implementations.
 
-    plt.figure(figsize=(12, 7))
+    Results are now indexed by (dimensions, threads)
+    """
+    # Group results by dimensions
+    dimensions = sorted(set(dim for dim, _ in results.keys()))
 
-    # Plot times
-    plt.plot(
-        dimensions,
-        sequential_times,
-        marker="o",
-        label="Sequential",
-        linewidth=2,
-        markersize=8,
-    )
-    plt.plot(
-        dimensions, parallel_times, marker="s", label="Parallel", linewidth=2, markersize=8
-    )
+    # Create a figure for each dimension
+    for dim in dimensions:
+        plt.figure(figsize=(12, 7))
 
-    plt.xlabel("Number of Dimensions")
-    plt.ylabel("Execution Time (ms)")
-    plt.title("K-means Clustering Execution Times Comparison")
-    plt.grid(True)
-    plt.legend()
+        # Get all thread values for this dimension
+        thread_results = {t: results[(dim, t)] for dim, t in results.keys() if dim == dim}
+        threads = sorted(thread_results.keys())
 
-    # Use log scale if the difference is too large
-    # Add safety checks to prevent division by zero
-    min_parallel = min(parallel_times)
-    max_sequential = max(sequential_times)
-    if min_parallel > 0 and max_sequential / min_parallel > 100:
-        plt.yscale("log")
+        # Sequential time is the same for all thread values
+        sequential_time = list(thread_results.values())[0].sequential_time
+        sequential_times = [sequential_time] * len(threads)
 
-    plt.savefig(RESULTS_DIR / f"{output_prefix}_execution_times.png")
-    plt.close()
+        # Get parallel times for each thread count
+        parallel_times = [thread_results[t].parallel_time for t in threads]
+
+        # Plot times
+        plt.plot(
+            threads,
+            sequential_times,
+            marker="o",
+            label="Sequential",
+            linewidth=2,
+            markersize=8,
+        )
+        plt.plot(
+            threads, parallel_times, marker="s", label="Parallel", linewidth=2, markersize=8
+        )
+
+        plt.xlabel("Number of Threads")
+        plt.ylabel("Execution Time (ms)")
+        plt.title(f"K-means Clustering Execution Times Comparison ({dim} dimensions)")
+        plt.grid(True)
+        plt.legend()
+
+        # Use log scale if the difference is too large
+        min_parallel = min(parallel_times)
+        if min_parallel > 0 and sequential_time / min_parallel > 100:
+            plt.yscale("log")
+
+        plt.savefig(RESULTS_DIR / f"{output_prefix}_execution_times_dim_{dim}.png")
+        plt.close()
+
+    # Create a figure comparing dimensions for each thread count
+    thread_counts = sorted(set(t for _, t in results.keys()))
+
+    for thread_count in thread_counts:
+        plt.figure(figsize=(12, 7))
+
+        # Get results for all dimensions with this thread count
+        dim_results = {dim: results[(dim, thread_count)] for dim, t in results.keys() if t == thread_count}
+        dims_for_thread = sorted(dim_results.keys())
+
+        # Get sequential and parallel times for each dimension
+        sequential_times = [dim_results[dim].sequential_time for dim in dims_for_thread]
+        parallel_times = [dim_results[dim].parallel_time for dim in dims_for_thread]
+
+        # Plot times
+        plt.plot(
+            dims_for_thread,
+            sequential_times,
+            marker="o",
+            label="Sequential",
+            linewidth=2,
+            markersize=8,
+        )
+        plt.plot(
+            dims_for_thread, parallel_times, marker="s", label=f"Parallel ({thread_count} threads)",
+            linewidth=2, markersize=8
+        )
+
+        plt.xlabel("Number of Dimensions")
+        plt.ylabel("Execution Time (ms)")
+        plt.title(f"K-means Clustering Execution Times Comparison ({thread_count} threads)")
+        plt.grid(True)
+        plt.legend()
+
+        # Use log scale if the difference is too large
+        min_parallel = min(parallel_times) if parallel_times else 1.0
+        max_sequential = max(sequential_times) if sequential_times else 1.0
+        if min_parallel > 0 and max_sequential / min_parallel > 100:
+            plt.yscale("log")
+
+        plt.savefig(RESULTS_DIR / f"{output_prefix}_execution_times_threads_{thread_count}.png")
+        plt.close()
 
 
-def plot_speedup(results: Dict[int, ExperimentResult], output_prefix: str) -> None:
-    """Plot speedup achieved by parallel implementation."""
-    dimensions = list(results.keys())
-    speedups = [r.speedup for r in results.values()]
+def plot_speedup(results: Dict[Tuple[int, int], ExperimentResult], output_prefix: str) -> None:
+    """Plot speedup achieved by parallel implementation.
 
-    plt.figure(figsize=(12, 7))
+    Results are now indexed by (dimensions, threads)
+    """
+    # Group results by dimensions
+    dimensions = sorted(set(dim for dim, _ in results.keys()))
 
-    plt.plot(dimensions, speedups, marker="o", linewidth=2, markersize=8)
-    plt.xlabel("Number of Dimensions")
-    plt.ylabel("Speedup (x)")
-    plt.title("R Parallel K-means Speedup Analysis")
-    plt.grid(True)
+    # Create speedup plot for each dimension
+    for dim in dimensions:
+        plt.figure(figsize=(12, 7))
 
-    plt.savefig(RESULTS_DIR / f"{output_prefix}_speedup.png")
-    plt.close()
+        # Get all thread values for this dimension
+        thread_results = {t: results[(dim, t)] for dim, t in results.keys() if dim == dim}
+        threads = sorted(thread_results.keys())
 
+        # Get speedup for each thread count
+        speedups = [thread_results[t].speedup for t in threads]
 
-def plot_kmeans_clustering(x: np.ndarray, labels: np.ndarray, n_features: int) -> None:
-    """Plot visual clustering results."""
-    # This would normally use matplotlib to plot, but since we're using R
-    # we'll skip this and rely on R's plotting capabilities if needed
-    pass
+        # Plot speedup
+        plt.plot(threads, speedups, marker="o", linewidth=2, markersize=8)
+        plt.xlabel("Number of Threads")
+        plt.ylabel("Speedup (x)")
+        plt.title(f"R Parallel K-means Speedup Analysis ({dim} dimensions)")
+        plt.grid(True)
+
+        # Add theoretical maximum speedup line (linear speedup)
+        ideal_speedups = threads
+        plt.plot(threads, ideal_speedups, linestyle='--', label="Ideal Speedup", alpha=0.7)
+        plt.legend()
+
+        plt.savefig(RESULTS_DIR / f"{output_prefix}_speedup_dim_{dim}.png")
+        plt.close()
+
+    # Create 3D plot showing speedup for both dimensions and threads
+    try:
+        from mpl_toolkits.mplot3d import Axes3D
+
+        fig = plt.figure(figsize=(14, 10))
+        ax = fig.add_subplot(111, projection='3d')
+
+        # Create data points for 3D plot
+        x = []  # dimensions
+        y = []  # threads
+        z = []  # speedup
+
+        for (dim, thread), result in results.items():
+            x.append(dim)
+            y.append(thread)
+            z.append(result.speedup)
+
+        # Create scatter plot
+        scatter = ax.scatter(x, y, z, c=z, cmap='viridis', s=100, alpha=0.8)
+
+        # Add labels and title
+        ax.set_xlabel('Dimensions')
+        ax.set_ylabel('Threads')
+        ax.set_zlabel('Speedup')
+        ax.set_title('Speedup Analysis (Dimensions vs Threads)')
+
+        # Add colorbar
+        cbar = fig.colorbar(scatter, ax=ax, label='Speedup')
+
+        plt.savefig(RESULTS_DIR / f"{output_prefix}_speedup_3d.png")
+        plt.close()
+    except ImportError:
+        print("Warning: 3D plotting not available. Skipping 3D speedup plot.")
 
 
 def main():
-    """Run experiments for R K-means implementation"""
+    """Run experiments for R K-means implementation with varying dimensions and threads"""
     results = {}
 
+    # First, generate datasets for all dimensions
     for n_features in N_FEATURES_LIST:
-        print(f"\nRunning experiments for {n_features} dimensions...")
-
-        # Generate and save dataset
+        print(f"\nGenerating dataset for {n_features} dimensions...")
         generate_dataset(N_SAMPLES, n_features, N_CLUSTERS)
+
+    # Then run experiments for all combinations of dimensions and threads
+    for n_features in N_FEATURES_LIST:
         dataset_file = f"dataset_{n_features}d.csv"
 
-        # Run R implementation
-        result = run_kmeans_r(dataset_file, N_CLUSTERS, MAX_ITER)
-        results[n_features] = result
+        for n_threads in NUM_THREADS:
+            print(f"\nRunning experiment with {n_features} dimensions and {n_threads} threads...")
+
+            # Run R implementation
+            result = run_kmeans_r(dataset_file, N_CLUSTERS, MAX_ITER, n_threads)
+            results[(n_features, n_threads)] = result
 
     # Plot comparative results
     plot_execution_times(results, "r_kmeans")
     plot_speedup(results, "r_kmeans")
 
     # Save results to CSV
-    results_df = pd.DataFrame.from_dict(
-        {k: vars(v) for k, v in results.items()}, orient="index"
-    )
-    results_df.index.name = "dimensions"
-    results_df.to_csv(RESULTS_DIR / "r_kmeans_results.csv")
+    results_df = pd.DataFrame([
+        {
+            'dimensions': dim,
+            'threads': threads,
+            'sequential_time': result.sequential_time,
+            'parallel_time': result.parallel_time,
+            'speedup': result.speedup
+        }
+        for (dim, threads), result in results.items()
+    ])
+
+    results_df.to_csv(RESULTS_DIR / "r_kmeans_results.csv", index=False)
 
 
 if __name__ == "__main__":

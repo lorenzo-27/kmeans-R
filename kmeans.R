@@ -190,8 +190,9 @@ kmeans_parallel <- function(x, k, max_iter, n_cores = detectCores() - 1) {
 #' @param k Number of clusters
 #' @param max_iter Maximum number of iterations
 #' @param data_dir Directory containing the input file
+#' @param n_threads Number of threads to use
 #' @return List with execution times and speedup information
-run_kmeans <- function(input_file, k, max_iter, data_dir) {
+run_kmeans <- function(input_file, k, max_iter, data_dir, n_threads) {
   input_path <- file.path(data_dir, input_file)
   cat(sprintf("Loading data from %s\n", input_path))
   
@@ -207,12 +208,10 @@ run_kmeans <- function(input_file, k, max_iter, data_dir) {
   sequential_time <- as.numeric(difftime(seq_end, seq_start, units = "secs")) * 1000  # Convert to ms
   
   # Run parallel k-means
-  cat("Running parallel k-means...\n")
-  n_cores <- detectCores() - 1
-  cat(sprintf("Using %d cores for parallel execution\n", n_cores))
+  cat(sprintf("Running parallel k-means with %d threads...\n", n_threads))
   
   par_start <- Sys.time()
-  par_result <- kmeans_parallel(x, k, max_iter, n_cores)
+  par_result <- kmeans_parallel(x, k, max_iter, n_threads)
   par_end <- Sys.time()
   parallel_time <- as.numeric(difftime(par_end, par_start, units = "secs")) * 1000  # Convert to ms
   
@@ -221,14 +220,15 @@ run_kmeans <- function(input_file, k, max_iter, data_dir) {
   
   # Print results
   cat(sprintf("Sequential execution time: %.2f ms\n", sequential_time))
-  cat(sprintf("Parallel execution time: %.2f ms\n", parallel_time))
+  cat(sprintf("Parallel execution time (threads=%d): %.2f ms\n", n_threads, parallel_time))
   cat(sprintf("Speedup: %.2fx\n", speedup))
   
   # Export the results to a JSON file that Python can read
   result <- list(
     sequential_time = sequential_time,
     parallel_time = parallel_time,
-    speedup = speedup
+    speedup = speedup,
+    n_threads = n_threads
   )
   
   return(result)
@@ -236,10 +236,10 @@ run_kmeans <- function(input_file, k, max_iter, data_dir) {
 
 #' Main function to run a single experiment and return the results
 #'
-#' @param args List of arguments including dataset_file, n_clusters, max_iter, data_dir
+#' @param args List of arguments including dataset_file, n_clusters, max_iter, data_dir, n_threads
 #' @return JSON string with results
 run_experiment <- function(args) {
-  result <- run_kmeans(args$dataset_file, args$n_clusters, args$max_iter, args$data_dir)
+  result <- run_kmeans(args$dataset_file, args$n_clusters, args$max_iter, args$data_dir, args$n_threads)
   return(toJSON(result))
 }
 
